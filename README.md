@@ -2,18 +2,18 @@
 
 **Give your retired Android phone a second life as a silent, ~3W 24/7 4K Jellyfin Media Server + USB-C NAS—without root.**
 
-Millions of capable 64-bit Android phones end up in drawers or e-waste every year despite having fast ARM64 CPUs, gigabit Wi-Fi, built-in battery backup (UPS), and USB-C storage support. This toolkit turns any modern Android phone (Android 10–16+, e.g. Pixel, Galaxy, OnePlus) into a self-healing 24/7 **Jellyfin Media Server** using Termux + Debian ARM64 (`proot-distro`), complete with **cross-platform Python (macOS / Linux / Windows)** and **PowerShell** management scripts.
+Millions of capable 64-bit Android phones end up in drawers or e-waste every year despite having fast ARM64 CPUs, gigabit Wi-Fi, built-in battery backup (UPS), and USB-C storage support. This toolkit turns any modern Android phone (Android 10–16+, e.g. Pixel, Galaxy, OnePlus) into a self-healing 24/7 **Jellyfin Media Server** using Termux + Debian ARM64 (`proot-distro`), complete with **cross-platform Python (macOS / Linux / Windows)** and **PowerShell** management scripts that also work with standard Linux/NAS Jellyfin servers.
 
 ---
 
 ## ✨ Features
 
 - **♻️ Zero E-Waste, Ultra-Low Power (~2–4W Idle)**: Runs silently 24/7 with a built-in battery UPS and no root required.
-- **🍎🐧🪟 Full Cross-Platform Support**: Every host management script includes both a **Python 3** version (zero external dependencies for macOS, Linux, and Windows) and a native **PowerShell** version.
+- **🍎🐧🪟 100% Python + Shell/PowerShell**: Every script in `device/`, `scripts/`, and `tools/` includes a pure **Python 3** version (zero external `pip` dependencies for macOS, Linux, Windows, and Termux) alongside native Bash/PowerShell scripts.
 - **🛡️ Android 12–16+ Phantom Process Killer Fix**: Automatically configures `max_phantom_processes` and Doze battery whitelists over ADB so Android never kills `jellyfin` or `sshd` in the background.
 - **💾 External USB-C Drive + Internal Storage Auto-Detection**: Automatically detects external USB-C SSDs/HDDs (including Android 14+ `/mnt/media_rw/<UUID>` mounts) and binds them to `/media/{Movies,Series,Audiobooks}` inside Debian.
 - **🔄 Self-Healing Launcher (`start_media_server.py` / `start-media-server.ps1`)**: Checks if Jellyfin (`:8096`) is online; if not, starts it over SSH (`:8022`); if SSH is down, automatically scans for Android Wireless Debugging ports, wakes the phone, starts `sshd`, and launches Jellyfin.
-- **📦 Differential Media Sync (`push_media.py` / `push-media.ps1`)**: Pushes Movies, TV Series, and Audiobooks from your computer while skipping files already on the server.
+- **📦 Universal Jellyfin Differential Media Sync (`push_media.py` / `push-media.ps1`)**: Works with **any Jellyfin SSH server** (Android/Termux on port `8022` or Linux/NAS/Raspberry Pi on port `22`). Pushes Movies, TV Series, and Audiobooks, automatically includes companion `.srt` subtitles, skips files already on the server, and optionally triggers a Jellyfin library scan (`POST /Library/Refresh`).
 - **🌐 Persian (`CP1256`) & Nested Subtitle Organizer (`organize-media-and-subs.py`)**: Extracts nested `Subs/` folders and `.zip` subtitle archives alongside video files and automatically converts `Windows-1256` (`CP1256` Persian/Farsi) and `UTF-16` `.srt` files into clean `UTF-8`.
 - **📅 Upcoming Episodes Optimizer (`optimize-upcoming-episodes.py`)**: Configures Jellyfin's TMDb plugin to display upcoming episodes (`ImportUnairedEpisodes = true`) without backfilling thousands of historical missing episodes or repeatedly refreshing ended TV shows.
 
@@ -26,15 +26,17 @@ jellyfin-android-server/
 ├── .env.example                       # Copy to .env (gitignored) for Python scripts (macOS/Linux/Windows)
 ├── config.example.ps1                 # Copy to config.ps1 (gitignored) for PowerShell scripts
 ├── device/
-│   ├── android-jellyfin-setup.sh      # Runs inside Termux: installs SSH, Debian ARM64 & Jellyfin
-│   └── harden-android-server.sh       # Locks SSH to key-only auth & restricts Jellyfin to your LAN subnet
+│   ├── android_jellyfin_setup.py      # Runs inside Termux (Python): installs SSH, Debian ARM64 & Jellyfin
+│   ├── android-jellyfin-setup.sh      # Runs inside Termux (Bash): installs SSH, Debian ARM64 & Jellyfin
+│   ├── harden_android_server.py       # Locks SSH to key-only auth & restricts Jellyfin to LAN (Python)
+│   └── harden-android-server.sh       # Locks SSH to key-only auth & restricts Jellyfin to LAN (Bash)
 ├── scripts/
 │   ├── setup_android_host.py          # Cross-platform ADB provisioner (macOS / Linux / Windows)
 │   ├── setup-android-host.ps1         # PowerShell ADB provisioner
 │   ├── start_media_server.py          # Cross-platform self-healing launcher (HTTP -> SSH -> Wireless ADB)
 │   ├── start-media-server.ps1         # PowerShell self-healing launcher
-│   ├── push_media.py                  # Cross-platform differential media uploader
-│   ├── push-media.ps1                 # PowerShell differential media uploader
+│   ├── push_media.py                  # Cross-platform differential media & subtitle uploader
+│   ├── push-media.ps1                 # PowerShell differential media & subtitle uploader
 │   ├── manage_media.py                # Cross-platform remote storage manager (list, space, remove)
 │   ├── manage-media.ps1               # PowerShell remote storage manager
 │   ├── mount_media_drive.py           # Mounts phone storage via SSH-tunneled WebDAV (macOS Finder / Linux / Windows)
@@ -74,18 +76,15 @@ python3 scripts/setup_android_host.py --connect 192.168.1.100:5555
 .\scripts\setup-android-host.ps1 -ConnectIpPort "192.168.1.100:5555"
 ```
 
-What this does:
-- Disables Android's **Phantom Process Killer** (`max_phantom_processes = 2147483647`) so background server processes are never killed.
-- Whitelists `com.termux` and `com.termux.boot` from Android Doze battery restrictions and grants `MANAGE_EXTERNAL_STORAGE`.
-- Pushes `android-jellyfin-setup.sh` to `/sdcard/Download/android-jellyfin-setup.sh` and opens Termux.
-
 ---
 
 ### Step 2: Bootstrap Debian & Jellyfin Inside Termux
-On the phone inside **Termux**, run:
+On the phone inside **Termux**, run either the Bash or Python installer:
 
 ```bash
 bash /sdcard/Download/android-jellyfin-setup.sh
+# Or with Python inside Termux:
+pkg install -y python && python3 /sdcard/Download/android_jellyfin_setup.py
 ```
 
 Once setup completes:
@@ -106,18 +105,20 @@ Once setup completes:
 ---
 
 ### Step 3: Configure Local Scripts (`.env` or `config.ps1`)
-Copy `.env.example` to `.env` (for Python on macOS/Linux/Windows) or `config.example.ps1` to `config.ps1` (for PowerShell). Both files are gitignored so your personal IPs stay private:
+Copy `.env.example` to `.env` (for Python on macOS/Linux/Windows) or `config.example.ps1` to `config.ps1` (for PowerShell). Both files are gitignored so your personal IPs and API keys stay private:
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` with your phone's LAN IP and Termux username:
+Edit `.env` with your Jellyfin server's LAN IP and SSH username (works for Android/Termux on port `8022` or any Linux/NAS Jellyfin server on port `22`):
 ```ini
 ANDROID_HOST_IP=192.168.1.100
 ANDROID_SSH_USER=u0_a300
 ANDROID_SSH_PORT=8022
+REMOTE_MEDIA_ROOT=media
 JELLYFIN_PORT=8096
+JELLYFIN_API_KEY=
 ```
 
 Copy your SSH key to the phone for passwordless uploads:
@@ -127,6 +128,8 @@ ssh-copy-id -p 8022 u0_a300@192.168.1.100
 
 *(Optional)* Lock down SSH (key-only) and restrict Jellyfin to your local subnet:
 ```bash
+ssh -p 8022 u0_a300@192.168.1.100 "python3 -" < device/harden_android_server.py
+# Or via Bash:
 ssh -p 8022 u0_a300@192.168.1.100 "bash -s" < device/harden-android-server.sh
 ```
 
@@ -145,8 +148,8 @@ python3 scripts/start_media_server.py
 .\scripts\start-media-server.ps1
 ```
 
-### 2. Upload Movies, TV Episodes, or Audiobooks
-Automatically checks existing files on the server and uploads only new files:
+### 2. Upload Movies, TV Episodes, or Audiobooks (Android, Linux, or NAS Jellyfin Servers)
+Automatically checks existing files on the server, uploads only new files (plus any matching `.srt` subtitles), and optionally triggers a Jellyfin library scan if `JELLYFIN_API_KEY` / `--api-key` is set:
 
 **macOS / Linux / Windows (Python):**
 ```bash

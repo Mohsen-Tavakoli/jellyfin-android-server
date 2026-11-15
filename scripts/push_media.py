@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
-Cross-Platform Smart Differential Media Uploader (macOS / Linux / Windows)
+Cross-Platform Smart Differential Media Uploader for Jellyfin Servers (macOS / Linux / Windows)
 
+Works with both Android/Termux Jellyfin hosts (`REMOTE_MEDIA_ROOT=media`, port 8022)
+and standard Linux / NAS / Raspberry Pi Jellyfin servers (`REMOTE_MEDIA_ROOT=/mnt/media`, port 22).
+
+Features:
 1. Resolves local files, folders, or space/dot-insensitive wildcards.
-2. Checks what files already exist on the Android Jellyfin server.
-3. Skips already-uploaded files (saves bandwidth & time).
-4. Uploads only missing/new files over SSH (port 8022) or ADB.
+2. Automatically discovers companion `.srt` subtitle files alongside matched videos.
+3. Checks what files already exist on the server and skips already-uploaded files.
+4. Uploads only missing/new files over SSH/SCP or ADB.
+5. Optionally triggers a Jellyfin Library Scan (`POST /Library/Refresh`) after upload.
 
 Examples:
-    python3 scripts/push_media.py --category Series --show-name "Sample Show" " ~/Downloads/Sample Show S01*"
+    python3 scripts/push_media.py --category Series --show-name "Sample Show" "~/Downloads/Sample Show S01*"
     python3 scripts/push_media.py --category Movies "~/Movies/Big Buck Bunny (2008).mkv"
-    python3 scripts/push_media.py --category Audiobooks --show-name "Sample Audiobook" "~/Audiobooks/Sample*"
+    python3 scripts/push_media.py --category Audiobooks --book-name "Sample Audiobook" "~/Audiobooks/Sample*"
 """
 
 import argparse
@@ -21,6 +26,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -31,6 +37,9 @@ def load_config() -> dict:
         "ANDROID_HOST_IP": os.environ.get("ANDROID_HOST_IP", "192.168.1.100"),
         "ANDROID_SSH_USER": os.environ.get("ANDROID_SSH_USER", "u0_a300"),
         "ANDROID_SSH_PORT": os.environ.get("ANDROID_SSH_PORT", "8022"),
+        "REMOTE_MEDIA_ROOT": os.environ.get("REMOTE_MEDIA_ROOT", "media"),
+        "JELLYFIN_PORT": os.environ.get("JELLYFIN_PORT", "8096"),
+        "JELLYFIN_API_KEY": os.environ.get("JELLYFIN_API_KEY", ""),
     }
     env_file = REPO_ROOT / ".env"
     if env_file.is_file():
@@ -55,7 +64,6 @@ def resolve_local_files(patterns: list[str]) -> list[Path]:
         elif p.is_file():
             matched_paths.append(p)
         else:
-            # Exact glob + space/dot-flexible glob
             for m in glob.glob(expanded):
                 matched_paths.append(Path(m))
             parent = os.path.dirname(expanded)
@@ -73,14 +81,32 @@ def resolve_local_files(patterns: list[str]) -> list[Path]:
                         found[str(child.resolve())] = child
             elif mp.is_file():
                 found[str(mp.resolve())] = mp
+                # Also pick up companion .srt files in the same directory
+                for srt in sorted(mp.parent.glob(f"{mp.stem}*.srt")):
+                    if srt.is_file():
+                        found[str(srt.resolve())] = srt
 
     return list(found.values())
+
+
+def trigger_jellyfin_refresh(host_ip: str, port: int, api_key: str) -> None:
+    url = f"http://{host_ip}:{port}/Library/Refresh"
+    headers = {
+        "X-Emby-Token": api_key,
+        "Authorization": f'MediaBrowser Token="{api_key}"',
+    }
+    req = urllib.request.Request(url, data=b"", headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            print("  [+] Triggered Jellyfin library scan (/Library/Refresh)!")
+    except Exception as e:
+        print(f"  [i] Could not trigger Jellyfin library scan: {e}")
 
 
 def main():
     cfg = load_config()
     parser = argparse.ArgumentParser(
-        description="Differential media uploader from macOS / Linux / Windows to Android Jellyfin Server."
+        description="Differential media uploader from macOS / Linux / Windows to any Jellyfin SSH host."
     )
     parser.add_argument("paths", nargs="+", help="Local file(s), folder(s), or wildcard pattern(s)")
     parser.add_argument(
@@ -96,9 +122,16 @@ def main():
         default="",
         help="Show or Audiobook folder name on the server",
     )
-    parser.add_argument("--host-ip", default=cfg["ANDROID_HOST_IP"], help="Android host LAN IP")
-    parser.add_argument("--ssh-user", default=cfg["ANDROID_SSH_USER"], help="Termux SSH username")
-    parser.add_argument("--ssh-port", type=int, default=int(cfg["ANDROID_SSH_PORT"]), help="Termux SSH port (default: 8022)")
+    parser.add_argument("--host-ip", default=cfg["ANDROID_HOST_IP"], help="Jellyfin host LAN IP")
+    parser.add_argument("--ssh-user", default=cfg["ANDROID_SSH_USER"], help="SSH username")
+    parser.add_argument("--ssh-port", type=int, default=int(cfg["ANDROID_SSH_PORT"]), help="SSH port (default: 8022 or 22)")
+    parser.add_argument(
+        "--remote-root",
+        default=cfg["REMOTE_MEDIA_ROOT"],
+        help="Remote media root folder (default: 'media' for ~/media, or '/mnt/media' on Linux/NAS)",
+    )
+    parser.add_argument("--jellyfin-port", type=int, default=int(cfg["JELLYFIN_PORT"]), help="Jellyfin HTTP port (default: 8096)")
+    parser.add_argument("--api-key", default=cfg["JELLYFIN_API_KEY"], help="Optional Jellyfin API key to auto-refresh library after upload")
     parser.add_argument("--use-adb", action="store_true", help="Push over ADB instead of SSH/SCP")
     parser.add_argument("--force", action="store_true", help="Overwrite files even if already on server")
     args = parser.parse_args()
@@ -108,16 +141,17 @@ def main():
         print(f"[!] No matching local files found for: {', '.join(args.paths)}", file=sys.stderr)
         sys.exit(1)
 
+    root = args.remote_root.rstrip("/")
     if args.show_name:
-        remote_dir = f"media/Audiobooks/{args.show_name}" if args.category == "Audiobooks" else f"media/Series/{args.show_name}"
+        remote_dir = f"{root}/Audiobooks/{args.show_name}" if args.category == "Audiobooks" else f"{root}/Series/{args.show_name}"
     else:
-        remote_dir = f"media/{args.category}"
+        remote_dir = f"{root}/{args.category}"
 
     remote_dir_quoted = shlex.quote(remote_dir)
     target = f"{args.ssh_user}@{args.host_ip}" if args.ssh_user else args.host_ip
 
     print("\n========================================================")
-    print("  Android Media Server Smart Differential Sync")
+    print("  Jellyfin Server Smart Differential Media Sync")
     print("========================================================\n")
 
     existing_files: set[str] = set()
@@ -127,7 +161,7 @@ def main():
             capture_output=True,
         )
         if not args.force:
-            print(f"[*] Checking existing files on server in ~/{remote_dir}...")
+            print(f"[*] Checking existing files on server in {remote_dir}...")
             res = subprocess.run(
                 ["ssh", "-p", str(args.ssh_port), "-o", "StrictHostKeyChecking=no", target, f"ls -1 {remote_dir_quoted}"],
                 capture_output=True,
@@ -147,7 +181,7 @@ def main():
             skipped += 1
             continue
 
-        print(f"\n[*] Uploading '{fn}' ({size_mb} MB) -> ~/{remote_dir}/...")
+        print(f"\n[*] Uploading '{fn}' ({size_mb} MB) -> {remote_dir}/...")
         if args.use_adb:
             adb = shutil.which("adb") or "adb"
             df_res = subprocess.run(
@@ -183,6 +217,9 @@ def main():
             uploaded += 1
         else:
             print(f"  [!] Failed uploading '{fn}'")
+
+    if uploaded > 0 and args.api_key:
+        trigger_jellyfin_refresh(args.host_ip, args.jellyfin_port, args.api_key)
 
     print("\n========================================================")
     print(f"  Summary: {uploaded} uploaded, {skipped} skipped (already present).")

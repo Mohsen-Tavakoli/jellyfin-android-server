@@ -1,11 +1,12 @@
 <#
 .SYNOPSIS
-    Smart differential media uploader from PC to Android 4K Jellyfin Media Server.
+    Smart differential media uploader from PC to any Jellyfin Server (Android/Termux, Linux, or NAS).
 .DESCRIPTION
     1. Resolves local files, folders, or space/dot-insensitive wildcards.
-    2. Checks what files already exist on the server.
-    3. Skips already-uploaded files (saves bandwidth & time).
-    4. Uploads only missing/new files over SSH (port 8022) or ADB.
+    2. Automatically includes companion .srt subtitle files alongside matched videos.
+    3. Checks what files already exist on the server and skips already-uploaded files.
+    4. Uploads only missing/new files over SSH (port 8022 or 22) or ADB.
+    5. Optionally triggers a Jellyfin Library Scan (/Library/Refresh) after uploading.
 .EXAMPLE
     .\scripts\push-media.ps1 -Path "C:\Media\Sample Show S01*" -Category Series -ShowName "Sample Show"
     .\scripts\push-media.ps1 -Category Movies -Path "C:\Media\Big Buck Bunny (2008).mkv"
@@ -26,6 +27,9 @@ param(
     [string]$HostIp = "",
     [string]$SshUser = "",
     [int]$SshPort = 0,
+    [string]$RemoteRoot = "",
+    [int]$JellyfinPort = 0,
+    [string]$ApiKey = "",
     [switch]$UseAdb,
     [switch]$Force
 )
@@ -34,9 +38,12 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Split-Path -Parent $scriptDir
 if (Test-Path "$repoRoot\config.ps1") { . "$repoRoot\config.ps1" }
 
-if (-not $HostIp)   { $HostIp  = if ($script:DefaultAndroidIp)   { $script:DefaultAndroidIp }   else { "192.168.1.100" } }
-if (-not $SshUser)  { $SshUser = if ($script:DefaultAndroidUser) { $script:DefaultAndroidUser } else { "u0_a300" } }
-if ($SshPort -le 0) { $SshPort = if ($script:DefaultSshPort)     { $script:DefaultSshPort }     else { 8022 } }
+if (-not $HostIp)       { $HostIp       = if ($script:DefaultAndroidIp)      { $script:DefaultAndroidIp }      else { "192.168.1.100" } }
+if (-not $SshUser)      { $SshUser      = if ($script:DefaultAndroidUser)    { $script:DefaultAndroidUser }    else { "u0_a300" } }
+if ($SshPort -le 0)     { $SshPort      = if ($script:DefaultSshPort)        { $script:DefaultSshPort }        else { 8022 } }
+if (-not $RemoteRoot)   { $RemoteRoot   = if ($script:DefaultRemoteRoot)     { $script:DefaultRemoteRoot }     else { "media" } }
+if ($JellyfinPort -le 0){ $JellyfinPort = if ($script:DefaultJellyfinPort)   { $script:DefaultJellyfinPort }   else { 8096 } }
+if (-not $ApiKey)       { $ApiKey       = if ($script:DefaultJellyfinApiKey) { $script:DefaultJellyfinApiKey } else { "" } }
 
 # Resolve one or more literal paths, directories, or wildcards
 $localFiles = @()
@@ -44,7 +51,9 @@ foreach ($p in $Path) {
     if (Test-Path -LiteralPath $p -PathType Container) {
         $localFiles += Get-ChildItem -LiteralPath $p -File -Recurse
     } elseif (Test-Path -LiteralPath $p -PathType Leaf) {
-        $localFiles += Get-Item -LiteralPath $p
+        $item = Get-Item -LiteralPath $p
+        $localFiles += $item
+        $localFiles += Get-ChildItem -Path (Join-Path $item.DirectoryName "$($item.BaseName)*.srt") -File -ErrorAction SilentlyContinue
     } else {
         $parentDir = Split-Path -Path $p -Parent
         $leafPattern = Split-Path -Path $p -Leaf
@@ -62,26 +71,29 @@ foreach ($p in $Path) {
                 $localFiles += Get-ChildItem -LiteralPath $m.FullName -File -Recurse
             } else {
                 $localFiles += $m
+                $localFiles += Get-ChildItem -Path (Join-Path $m.DirectoryName "$($m.BaseName)*.srt") -File -ErrorAction SilentlyContinue
             }
         }
     }
 }
+$localFiles = $localFiles | Sort-Object FullName -Unique
 
 if (-not $localFiles -or $localFiles.Count -eq 0) {
     Write-Error "No matching files found for: $($Path -join ', ')"
     exit 1
 }
 
+$rootTrimmed = $RemoteRoot.TrimEnd('/')
 $remoteDir = if ($ShowName) {
-    if ($Category -eq "Audiobooks") { "media/Audiobooks/$ShowName" } else { "media/Series/$ShowName" }
+    if ($Category -eq "Audiobooks") { "$rootTrimmed/Audiobooks/$ShowName" } else { "$rootTrimmed/Series/$ShowName" }
 } else {
-    "media/$Category"
+    "$rootTrimmed/$Category"
 }
 $remoteDirQuoted = "'" + ($remoteDir -replace "'", "'\\''") + "'"
 $target = if ($SshUser) { "$SshUser@$HostIp" } else { $HostIp }
 
 Write-Host "`n========================================================" -ForegroundColor Cyan
-Write-Host "  Android Media Server Smart Differential Sync" -ForegroundColor Cyan
+Write-Host "  Jellyfin Server Smart Differential Media Sync" -ForegroundColor Cyan
 Write-Host "========================================================`n" -ForegroundColor Cyan
 
 # 1. Ensure remote directory exists and fetch existing files list for differential skip
@@ -89,7 +101,7 @@ $remoteExistingFiles = @()
 if (-not $UseAdb) {
     ssh.exe -p $SshPort -o StrictHostKeyChecking=no "$target" "mkdir -p $remoteDirQuoted" 2>$null | Out-Null
     if (-not $Force) {
-        Write-Host "[*] Checking existing files on server in ~/$remoteDir..." -ForegroundColor Cyan
+        Write-Host "[*] Checking existing files on server in $remoteDir..." -ForegroundColor Cyan
         $remoteListRaw = (ssh.exe -p $SshPort -o StrictHostKeyChecking=no "$target" "ls -1 $remoteDirQuoted" 2>$null | Out-String)
         if ($remoteListRaw) {
             $remoteExistingFiles = $remoteListRaw -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
@@ -110,7 +122,7 @@ foreach ($file in $localFiles) {
         continue
     }
 
-    Write-Host "`n[*] Uploading '$fn' ($sizeMB MB) -> ~/$remoteDir/..." -ForegroundColor Cyan
+    Write-Host "`n[*] Uploading '$fn' ($sizeMB MB) -> $remoteDir/..." -ForegroundColor Cyan
     if ($UseAdb) {
         $adb = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Google.PlatformTools_Microsoft.Winget.Source_8wekyb3d8bbwe\platform-tools\adb.exe"
         if (-not (Test-Path $adb)) { $adb = "adb" }
@@ -126,6 +138,15 @@ foreach ($file in $localFiles) {
         $uploadedCount++
     } else {
         Write-Host "  [!] Failed uploading '$fn'" -ForegroundColor Red
+    }
+}
+
+if ($uploadedCount -gt 0 -and $ApiKey) {
+    try {
+        Invoke-RestMethod -Uri "http://${HostIp}:${JellyfinPort}/Library/Refresh" -Method Post -Headers @{ "X-Emby-Token" = $ApiKey } -TimeoutSec 10 | Out-Null
+        Write-Host "  [+] Triggered Jellyfin library scan (/Library/Refresh)!" -ForegroundColor Green
+    } catch {
+        Write-Host "  [i] Could not trigger Jellyfin library scan: $_" -ForegroundColor Yellow
     }
 }
 

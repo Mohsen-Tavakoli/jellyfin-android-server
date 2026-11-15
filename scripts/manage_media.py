@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Cross-Platform Storage Manager for Android Jellyfin Media Server (macOS / Linux / Windows)
+Cross-Platform Storage Manager for Jellyfin Media Servers (macOS / Linux / Windows)
+
+Works with both Android/Termux Jellyfin hosts (`REMOTE_MEDIA_ROOT=media`, port 8022)
+and standard Linux / NAS / Raspberry Pi Jellyfin servers (`REMOTE_MEDIA_ROOT=/mnt/media`, port 22).
 
 Examples:
     python3 scripts/manage_media.py --action space
@@ -25,6 +28,7 @@ def load_config() -> dict:
         "ANDROID_HOST_IP": os.environ.get("ANDROID_HOST_IP", "192.168.1.100"),
         "ANDROID_SSH_USER": os.environ.get("ANDROID_SSH_USER", "u0_a300"),
         "ANDROID_SSH_PORT": os.environ.get("ANDROID_SSH_PORT", "8022"),
+        "REMOTE_MEDIA_ROOT": os.environ.get("REMOTE_MEDIA_ROOT", "media"),
     }
     env_file = REPO_ROOT / ".env"
     if env_file.is_file():
@@ -48,7 +52,7 @@ def ssh_capture(target: str, port: int, remote_cmd: str) -> str:
 
 def main():
     cfg = load_config()
-    parser = argparse.ArgumentParser(description="Manage media storage on the Android Jellyfin host.")
+    parser = argparse.ArgumentParser(description="Manage media storage on any Jellyfin SSH host.")
     parser.add_argument(
         "--action",
         choices=["list", "space", "remove"],
@@ -57,24 +61,31 @@ def main():
     )
     parser.add_argument("--filter", default="", help="Optional title/substring filter for --action list")
     parser.add_argument("--target", default="", help="Pattern of file(s) to delete for --action remove")
-    parser.add_argument("--host-ip", default=cfg["ANDROID_HOST_IP"], help="Android host LAN IP")
-    parser.add_argument("--ssh-user", default=cfg["ANDROID_SSH_USER"], help="Termux SSH username")
-    parser.add_argument("--ssh-port", type=int, default=int(cfg["ANDROID_SSH_PORT"]), help="Termux SSH port (default: 8022)")
+    parser.add_argument("--host-ip", default=cfg["ANDROID_HOST_IP"], help="Jellyfin host LAN IP")
+    parser.add_argument("--ssh-user", default=cfg["ANDROID_SSH_USER"], help="SSH username")
+    parser.add_argument("--ssh-port", type=int, default=int(cfg["ANDROID_SSH_PORT"]), help="SSH port (default: 8022 or 22)")
+    parser.add_argument(
+        "--remote-root",
+        default=cfg["REMOTE_MEDIA_ROOT"],
+        help="Remote media root folder (default: 'media' for ~/media, or '/mnt/media' on Linux/NAS)",
+    )
     parser.add_argument("--force", action="store_true", help="Skip confirmation prompt when removing files")
     args = parser.parse_args()
 
     ssh_target = f"{args.ssh_user}@{args.host_ip}"
+    root = args.remote_root.rstrip("/")
+    root_q = shlex.quote(root)
 
     print("\n========================================================")
-    print(f"  Android Media Storage Manager ({args.action.capitalize()})")
+    print(f"  Jellyfin Media Storage Manager ({args.action.capitalize()})")
     print("========================================================\n")
 
     if args.action == "space":
-        print("[*] Checking storage capacity on Android host...")
+        print("[*] Checking storage capacity on Jellyfin host...")
         out = ssh_capture(
             ssh_target,
             args.ssh_port,
-            "df -h ~/media; echo ''; du -sh ~/media/* ~/media/Series/* ~/media/Audiobooks/* 2>/dev/null",
+            f"df -h {root_q}; echo ''; du -sh {root_q}/* {root_q}/Series/* {root_q}/Audiobooks/* 2>/dev/null",
         )
         print(out)
         return
@@ -83,7 +94,7 @@ def main():
         raw = ssh_capture(
             ssh_target,
             args.ssh_port,
-            "cd ~/media && find Movies Series Audiobooks -type f 2>/dev/null | sort",
+            f"cd {root_q} && find Movies Series Audiobooks -type f 2>/dev/null | sort",
         )
         lines = [line.strip() for line in raw.splitlines() if line.strip()]
         if args.filter:
@@ -107,7 +118,7 @@ def main():
             ssh_capture(
                 ssh_target,
                 args.ssh_port,
-                "du -sh ~/media/Movies ~/media/Series/* ~/media/Audiobooks/* 2>/dev/null",
+                f"du -sh {root_q}/Movies {root_q}/Series/* {root_q}/Audiobooks/* 2>/dev/null",
             )
         )
         return
@@ -121,7 +132,7 @@ def main():
         raw = ssh_capture(
             ssh_target,
             args.ssh_port,
-            "cd ~/media && find Movies Series Audiobooks -type f 2>/dev/null | sort",
+            f"cd {root_q} && find Movies Series Audiobooks -type f 2>/dev/null | sort",
         )
         matches = [
             line.strip()
@@ -144,7 +155,7 @@ def main():
                 return
 
         for m in matches:
-            quoted = shlex.quote(f"media/{m}")
+            quoted = shlex.quote(f"{root}/{m}")
             rc = subprocess.run(
                 ["ssh", "-p", str(args.ssh_port), "-o", "StrictHostKeyChecking=no", ssh_target, f"rm -f {quoted}"]
             ).returncode
@@ -161,7 +172,7 @@ def main():
                 "-o",
                 "StrictHostKeyChecking=no",
                 ssh_target,
-                "find media/Series -mindepth 1 -type d -empty -delete 2>/dev/null",
+                f"find {root_q}/Series -mindepth 1 -type d -empty -delete 2>/dev/null",
             ],
             capture_output=True,
         )

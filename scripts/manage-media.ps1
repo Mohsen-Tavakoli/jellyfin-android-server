@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Storage manager for Android Jellyfin Media Server (list files, check free space, delete media).
+    Storage manager for Jellyfin Media Servers (list files, check free space, delete media).
 .EXAMPLE
     .\scripts\manage-media.ps1 -Action List
     .\scripts\manage-media.ps1 -Action List -Filter "Sample Show"
@@ -18,6 +18,7 @@ param(
     [string]$HostIp = "",
     [string]$SshUser = "",
     [int]$SshPort = 0,
+    [string]$RemoteRoot = "",
     [switch]$Force
 )
 
@@ -25,24 +26,27 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Split-Path -Parent $scriptDir
 if (Test-Path "$repoRoot\config.ps1") { . "$repoRoot\config.ps1" }
 
-if (-not $HostIp)   { $HostIp  = if ($script:DefaultAndroidIp)   { $script:DefaultAndroidIp }   else { "192.168.1.100" } }
-if (-not $SshUser)  { $SshUser = if ($script:DefaultAndroidUser) { $script:DefaultAndroidUser } else { "u0_a300" } }
-if ($SshPort -le 0) { $SshPort = if ($script:DefaultSshPort)     { $script:DefaultSshPort }     else { 8022 } }
+if (-not $HostIp)     { $HostIp     = if ($script:DefaultAndroidIp)   { $script:DefaultAndroidIp }   else { "192.168.1.100" } }
+if (-not $SshUser)    { $SshUser    = if ($script:DefaultAndroidUser) { $script:DefaultAndroidUser } else { "u0_a300" } }
+if ($SshPort -le 0)   { $SshPort    = if ($script:DefaultSshPort)     { $script:DefaultSshPort }     else { 8022 } }
+if (-not $RemoteRoot) { $RemoteRoot = if ($script:DefaultRemoteRoot)  { $script:DefaultRemoteRoot }  else { "media" } }
 
 $sshTarget = "$SshUser@$HostIp"
+$rootTrimmed = $RemoteRoot.TrimEnd('/')
+$rootQuoted  = "'" + ($rootTrimmed -replace "'", "'\\''") + "'"
 
 Write-Host "`n========================================================" -ForegroundColor Cyan
-Write-Host "  Android Media Storage Manager ($Action)" -ForegroundColor Cyan
+Write-Host "  Jellyfin Media Storage Manager ($Action)" -ForegroundColor Cyan
 Write-Host "========================================================`n" -ForegroundColor Cyan
 
 if ($Action -eq "Space") {
-    Write-Host "[*] Checking storage capacity on Android host..." -ForegroundColor Cyan
-    ssh.exe -p $SshPort -o StrictHostKeyChecking=no $sshTarget "df -h ~/media; echo ''; du -sh ~/media/* ~/media/Series/* ~/media/Audiobooks/* 2>/dev/null"
+    Write-Host "[*] Checking storage capacity on Jellyfin host..." -ForegroundColor Cyan
+    ssh.exe -p $SshPort -o StrictHostKeyChecking=no $sshTarget "df -h $rootQuoted; echo ''; du -sh $rootQuoted/* $rootQuoted/Series/* $rootQuoted/Audiobooks/* 2>/dev/null"
     exit 0
 }
 
 if ($Action -eq "List") {
-    $cmd = "cd ~/media && find Movies Series Audiobooks -type f 2>/dev/null | sort"
+    $cmd = "cd $rootQuoted && find Movies Series Audiobooks -type f 2>/dev/null | sort"
     $raw = (ssh.exe -p $SshPort -o StrictHostKeyChecking=no $sshTarget $cmd | Out-String)
     $lines = $raw -split '\r?\n' | Where-Object { $_.Trim() -ne "" }
 
@@ -66,7 +70,7 @@ if ($Action -eq "List") {
         Write-Host "`n  Total files matched: $($lines.Count)" -ForegroundColor Cyan
     }
     Write-Host "`n[*] Folder sizes:" -ForegroundColor Cyan
-    ssh.exe -p $SshPort -o StrictHostKeyChecking=no $sshTarget "du -sh ~/media/Movies ~/media/Series/* ~/media/Audiobooks/* 2>/dev/null"
+    ssh.exe -p $SshPort -o StrictHostKeyChecking=no $sshTarget "du -sh $rootQuoted/Movies $rootQuoted/Series/* $rootQuoted/Audiobooks/* 2>/dev/null"
     exit 0
 }
 
@@ -77,7 +81,7 @@ if ($Action -eq "Remove") {
     }
 
     $flexPattern = ($Target -replace '[\s\.\*]+', '.*')
-    $cmd = "cd ~/media && find Movies Series Audiobooks -type f 2>/dev/null | sort"
+    $cmd = "cd $rootQuoted && find Movies Series Audiobooks -type f 2>/dev/null | sort"
     $raw = (ssh.exe -p $SshPort -o StrictHostKeyChecking=no $sshTarget $cmd | Out-String)
     $matches = $raw -split '\r?\n' | Where-Object { $_.Trim() -ne "" -and $_ -match $flexPattern }
 
@@ -100,7 +104,7 @@ if ($Action -eq "Remove") {
     }
 
     foreach ($m in $matches) {
-        $singleQuoted = "'" + ("media/$m" -replace "'", "'\\''") + "'"
+        $singleQuoted = "'" + ("$rootTrimmed/$m" -replace "'", "'\\''") + "'"
         ssh.exe -p $SshPort -o StrictHostKeyChecking=no $sshTarget "rm -f $singleQuoted"
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  [+] Deleted: $m" -ForegroundColor Green
@@ -108,5 +112,5 @@ if ($Action -eq "Remove") {
             Write-Host "  [!] Failed to delete: $m" -ForegroundColor Red
         }
     }
-    ssh.exe -p $SshPort -o StrictHostKeyChecking=no $sshTarget "find media/Series -mindepth 1 -type d -empty -delete 2>/dev/null"
+    ssh.exe -p $SshPort -o StrictHostKeyChecking=no $sshTarget "find $rootQuoted/Series -mindepth 1 -type d -empty -delete 2>/dev/null"
 }
