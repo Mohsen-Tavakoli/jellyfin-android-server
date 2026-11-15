@@ -1,0 +1,13 @@
+# User-specific configuration (never commit your personal IPs or usernames)
+config.ps1
+.env
+
+# Local APK cache
+apks/*.apk
+
+# Python & OS artifacts
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+Thumbs.db
