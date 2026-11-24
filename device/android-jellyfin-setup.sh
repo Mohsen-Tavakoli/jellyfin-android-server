@@ -114,15 +114,15 @@ fi
 # Ensure SSH/SFTP server is running on port 8022
 pgrep -x "sshd" >/dev/null || sshd
 
-if pgrep -f "jellyfin\.dll" >/dev/null 2>&1; then
+if pgrep -f "jellyfin --datadir" >/dev/null 2>&1; then
     if [[ "$RESTART" -eq 1 ]]; then
         echo "[*] Stopping existing Jellyfin instance..."
-        pkill -TERM -f "jellyfin\.dll" 2>/dev/null || true
+        pkill -TERM -f "jellyfin --datadir" 2>/dev/null || true
         for _ in $(seq 1 15); do
-            pgrep -f "jellyfin\.dll" >/dev/null 2>&1 || break
+            pgrep -f "jellyfin --datadir" >/dev/null 2>&1 || break
             sleep 1
         done
-        pkill -KILL -f "jellyfin\.dll" 2>/dev/null || true
+        pkill -KILL -f "jellyfin --datadir" 2>/dev/null || true
     else
         echo "[i] Jellyfin is already running (pass --restart to restart it)."
         exit 0

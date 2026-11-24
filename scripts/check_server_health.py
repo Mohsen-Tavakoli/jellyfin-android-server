@@ -135,7 +135,7 @@ def main():
             'echo "MEDIA_TARGET=$(readlink -f ~/media 2>/dev/null || echo missing)"\n'
             'echo "PREFER_USB=$([ -f ~/.prefer-usb-storage ] && echo 1 || echo 0)"\n'
             'echo "USB_MOUNT=$(df 2>/dev/null | awk \'/\\/mnt\\/media_rw\\// {print $6; exit}\')"\n'
-            'echo "JELLYFIN_PID=$(pgrep -f \'jellyfin\\.dll\' | head -n1)"\n'
+            'echo "JELLYFIN_PID=$(pgrep -f \'jellyfin --datadir\' | head -n1)"\n'
             'echo "DF_LINE=$(df -h ~/media 2>/dev/null | tail -n1)"\n'
         )
         out = run_ssh(args.ssh_user, args.host_ip, args.ssh_port, ssh_script)
