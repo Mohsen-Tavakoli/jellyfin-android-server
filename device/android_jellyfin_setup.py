@@ -29,13 +29,19 @@ def capture(cmd: str) -> str:
     return (res.stdout or "").strip()
 
 
-def detect_usb_uuid() -> str:
-    storage = Path("/storage")
-    if not storage.is_dir():
-        return ""
-    for entry in sorted(storage.iterdir()):
-        if entry.name not in ("emulated", "self", "*") and entry.is_dir():
-            return entry.name
+def detect_usb_path() -> str:
+    df_mount = capture("df 2>/dev/null | awk '/\\/mnt\\/media_rw\\// {print $6; exit}'")
+    if df_mount and Path(df_mount).is_dir():
+        return df_mount
+    for base_dir in (Path("/mnt/media_rw"), Path("/storage")):
+        if not base_dir.is_dir():
+            continue
+        try:
+            for entry in sorted(base_dir.iterdir()):
+                if entry.name not in ("emulated", "self", "*") and entry.is_dir():
+                    return str(entry)
+        except PermissionError:
+            continue
     return ""
 
 
@@ -63,18 +69,25 @@ def main():
 
     # 3. Detect External USB-C Drive
     print("[2/5] Detecting External USB-C Drive...")
-    usb_uuid = detect_usb_uuid()
-    if usb_uuid:
-        print(f"  -> Found External USB Drive: /storage/{usb_uuid}")
-        media_root = Path(f"/storage/{usb_uuid}/Android/data/com.termux/files/Media")
+    home = Path.home()
+    usb_path = detect_usb_path()
+    if usb_path:
+        print(f"  -> Found External USB Drive: {usb_path}")
+        (home / ".prefer-usb-storage").touch()
+        media_root = Path(usb_path) / "Media"
+        try:
+            for sub in ("Movies", "Series", "Audiobooks"):
+                (media_root / sub).mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            media_root = Path(usb_path) / "Android/data/com.termux/files/Media"
+            for sub in ("Movies", "Series", "Audiobooks"):
+                (media_root / sub).mkdir(parents=True, exist_ok=True)
     else:
         print("  -> No external USB drive currently mounted. Using internal storage (/sdcard/Media).")
         media_root = Path("/sdcard/Media")
+        for sub in ("Movies", "Series", "Audiobooks"):
+            (media_root / sub).mkdir(parents=True, exist_ok=True)
 
-    for sub in ("Movies", "Series", "Audiobooks"):
-        (media_root / sub).mkdir(parents=True, exist_ok=True)
-
-    home = Path.home()
     media_link = home / "media"
     if media_link.is_symlink() or media_link.exists():
         media_link.unlink(missing_ok=True)
@@ -126,35 +139,89 @@ fi
         """#!/data/data/com.termux/files/usr/bin/bash
 termux-wake-lock || true
 
-USB_PATH=""
-for base_dir in /mnt/media_rw /storage; do
-    for dir in "$base_dir"/*; do
-        base=$(basename "$dir")
-        if [[ "$base" != "emulated" && "$base" != "self" && "$base" != "*" && -d "$dir" ]]; then
-            USB_PATH="$dir"
-            break 2
-        fi
-    done
-done
-if [[ -z "$USB_PATH" ]]; then
-    USB_PATH=$(df 2>/dev/null | awk '/\\/mnt\\/media_rw\\// {print $6; exit}')
+RESTART=0
+if [[ "$1" == "--restart" ]]; then
+    RESTART=1
 fi
 
+pgrep -x "sshd" >/dev/null || sshd
+
+if pgrep -f "jellyfin\\.dll" >/dev/null 2>&1; then
+    if [[ "$RESTART" -eq 1 ]]; then
+        echo "[*] Stopping existing Jellyfin instance..."
+        pkill -TERM -f "jellyfin\\.dll" 2>/dev/null || true
+        for _ in $(seq 1 15); do
+            pgrep -f "jellyfin\\.dll" >/dev/null 2>&1 || break
+            sleep 1
+        done
+        pkill -KILL -f "jellyfin\\.dll" 2>/dev/null || true
+    else
+        echo "[i] Jellyfin is already running (pass --restart to restart it)."
+        exit 0
+    fi
+fi
+
+detect_usb_path() {
+    local p=""
+    p=$(df 2>/dev/null | awk '/\\/mnt\\/media_rw\\// {print $6; exit}')
+    if [[ -n "$p" && -d "$p" ]]; then
+        echo "$p"
+        return 0
+    fi
+    for base_dir in /mnt/media_rw /storage; do
+        for dir in "$base_dir"/*; do
+            local base
+            base=$(basename "$dir")
+            if [[ "$base" != "emulated" && "$base" != "self" && "$base" != "*" && -d "$dir" ]]; then
+                echo "$dir"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+PREFER_USB_MARKER="$HOME/.prefer-usb-storage"
+DEFAULT_WAIT=15
+if [[ -f "$PREFER_USB_MARKER" ]]; then
+    DEFAULT_WAIT=90
+fi
+WAIT_LIMIT="${USB_WAIT_SECONDS:-$DEFAULT_WAIT}"
+REQUIRE_USB="${REQUIRE_USB:-0}"
+
+USB_PATH=$(detect_usb_path || true)
+ELAPSED=0
+while [[ -z "$USB_PATH" && "$ELAPSED" -lt "$WAIT_LIMIT" ]]; do
+    if [[ "$ELAPSED" -eq 0 ]]; then
+        echo "[*] Waiting up to ${WAIT_LIMIT}s for storage / external USB drive to mount..."
+    fi
+    sleep 3
+    ELAPSED=$((ELAPSED + 3))
+    USB_PATH=$(detect_usb_path || true)
+done
+
 if [[ -n "$USB_PATH" && -d "$USB_PATH" ]]; then
+    touch "$PREFER_USB_MARKER"
     MEDIA_ROOT="$USB_PATH/Media"
     mkdir -p "$MEDIA_ROOT/Movies" "$MEDIA_ROOT/Series" "$MEDIA_ROOT/Audiobooks" 2>/dev/null || {
         MEDIA_ROOT="$USB_PATH/Android/data/com.termux/files/Media"
         mkdir -p "$MEDIA_ROOT/Movies" "$MEDIA_ROOT/Series" "$MEDIA_ROOT/Audiobooks"
     }
-    echo "[+] Mounted External USB Drive: $MEDIA_ROOT"
+    echo "[+] Mounted External USB Drive: $MEDIA_ROOT (after ${ELAPSED}s)"
 else
+    if [[ "$REQUIRE_USB" -eq 1 ]]; then
+        echo "[!] ERROR: External USB drive not detected after ${WAIT_LIMIT}s and REQUIRE_USB=1. Aborting start."
+        exit 1
+    fi
+    for _ in $(seq 1 10); do
+        [[ -d "/sdcard" ]] && break
+        sleep 2
+    done
     MEDIA_ROOT="/sdcard/Media"
     mkdir -p "$MEDIA_ROOT/Movies" "$MEDIA_ROOT/Series" "$MEDIA_ROOT/Audiobooks"
     echo "[i] Using Internal Storage: $MEDIA_ROOT"
 fi
 ln -sfn "$MEDIA_ROOT" "$HOME/media"
-
-pgrep -x "sshd" >/dev/null || sshd
 
 IP_ADDR=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
 echo "========================================================"
@@ -166,7 +233,7 @@ echo "========================================================"
 
 proot-distro login debian \\
     --bind "$MEDIA_ROOT:/media" \\
-    -- bash -c "jellyfin --datadir /var/lib/jellyfin --cachedir /var/cache/jellyfin --webdir /usr/share/jellyfin/web --ffmpeg /usr/lib/jellyfin-ffmpeg/ffmpeg"
+    -- bash -c "DOTNET_SYSTEM_NET_DISABLEIPV6=1 jellyfin --datadir /var/lib/jellyfin --cachedir /var/cache/jellyfin --webdir /usr/share/jellyfin/web --ffmpeg /usr/lib/jellyfin-ffmpeg/ffmpeg"
 """,
         encoding="utf-8",
         newline="\n",

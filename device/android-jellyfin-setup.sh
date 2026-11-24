@@ -28,25 +28,34 @@ pkg install -y openssh proot-distro rclone rsync tmux iproute2 procps curl
 
 # 3. Detect External USB Hard Drive (or fallback to internal storage)
 echo "[2/5] Detecting External USB-C Drive..."
-USB_UUID=""
-for dir in /storage/*; do
-    base=$(basename "$dir")
-    if [[ "$base" != "emulated" && "$base" != "self" && "$base" != "*" && -d "$dir" ]]; then
-        USB_UUID="$base"
-        break
-    fi
-done
+USB_PATH=$(df 2>/dev/null | awk '/\/mnt\/media_rw\// {print $6; exit}')
+if [[ -z "$USB_PATH" ]]; then
+    for base_dir in /mnt/media_rw /storage; do
+        for dir in "$base_dir"/*; do
+            base=$(basename "$dir")
+            if [[ "$base" != "emulated" && "$base" != "self" && "$base" != "*" && -d "$dir" ]]; then
+                USB_PATH="$dir"
+                break 2
+            fi
+        done
+    done
+fi
 
-if [[ -n "$USB_UUID" ]]; then
-    echo "  -> Found External USB Drive: /storage/$USB_UUID"
-    MEDIA_ROOT="/storage/$USB_UUID/Android/data/com.termux/files/Media"
+if [[ -n "$USB_PATH" && -d "$USB_PATH" ]]; then
+    echo "  -> Found External USB Drive: $USB_PATH"
+    touch "$HOME/.prefer-usb-storage"
+    MEDIA_ROOT="$USB_PATH/Media"
+    mkdir -p "$MEDIA_ROOT/Movies" "$MEDIA_ROOT/Series" "$MEDIA_ROOT/Audiobooks" 2>/dev/null || {
+        MEDIA_ROOT="$USB_PATH/Android/data/com.termux/files/Media"
+        mkdir -p "$MEDIA_ROOT/Movies" "$MEDIA_ROOT/Series" "$MEDIA_ROOT/Audiobooks"
+    }
 else
     echo "  -> No external USB drive currently mounted. Using internal storage (/sdcard/Media)."
     echo "     (Re-run ~/start-media-server.sh anytime after plugging in a USB-C hub + drive.)"
     MEDIA_ROOT="/sdcard/Media"
+    mkdir -p "$MEDIA_ROOT/Movies" "$MEDIA_ROOT/Series" "$MEDIA_ROOT/Audiobooks"
 fi
 
-mkdir -p "$MEDIA_ROOT/Movies" "$MEDIA_ROOT/Series" "$MEDIA_ROOT/Audiobooks"
 ln -sfn "$MEDIA_ROOT" "$HOME/media"
 echo "  -> Media folders ready at: $MEDIA_ROOT/{Movies,Series,Audiobooks} (symlinked to ~/media)"
 
@@ -96,38 +105,95 @@ cat << 'EOF' > "$HOME/start-media-server.sh"
 #!/data/data/com.termux/files/usr/bin/bash
 termux-wake-lock || true
 
-# Auto-detect External USB Drive on every start (/mnt/media_rw/<UUID> or /storage/<UUID>)
-USB_PATH=""
-for base_dir in /mnt/media_rw /storage; do
-    for dir in "$base_dir"/*; do
-        base=$(basename "$dir")
-        if [[ "$base" != "emulated" && "$base" != "self" && "$base" != "*" && -d "$dir" ]]; then
-            USB_PATH="$dir"
-            break 2
-        fi
-    done
-done
-if [[ -z "$USB_PATH" ]]; then
-    # Fallback: parse df for /mnt/media_rw/<UUID> (Android 14+ hides /mnt/media_rw parent listing)
-    USB_PATH=$(df 2>/dev/null | awk '/\/mnt\/media_rw\// {print $6; exit}')
+# Optional: pass --restart to cleanly stop an existing Jellyfin instance first
+RESTART=0
+if [[ "$1" == "--restart" ]]; then
+    RESTART=1
 fi
 
+# Ensure SSH/SFTP server is running on port 8022
+pgrep -x "sshd" >/dev/null || sshd
+
+if pgrep -f "jellyfin\.dll" >/dev/null 2>&1; then
+    if [[ "$RESTART" -eq 1 ]]; then
+        echo "[*] Stopping existing Jellyfin instance..."
+        pkill -TERM -f "jellyfin\.dll" 2>/dev/null || true
+        for _ in $(seq 1 15); do
+            pgrep -f "jellyfin\.dll" >/dev/null 2>&1 || break
+            sleep 1
+        done
+        pkill -KILL -f "jellyfin\.dll" 2>/dev/null || true
+    else
+        echo "[i] Jellyfin is already running (pass --restart to restart it)."
+        exit 0
+    fi
+fi
+
+# Auto-detect External USB Drive (/mnt/media_rw/<UUID> or /storage/<UUID>)
+detect_usb_path() {
+    local p=""
+    # Parse df first (Android 14+ hides /mnt/media_rw parent directory listing)
+    p=$(df 2>/dev/null | awk '/\/mnt\/media_rw\// {print $6; exit}')
+    if [[ -n "$p" && -d "$p" ]]; then
+        echo "$p"
+        return 0
+    fi
+    for base_dir in /mnt/media_rw /storage; do
+        for dir in "$base_dir"/*; do
+            local base
+            base=$(basename "$dir")
+            if [[ "$base" != "emulated" && "$base" != "self" && "$base" != "*" && -d "$dir" ]]; then
+                echo "$dir"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+# On boot, Android's vold often takes 20-60s to enumerate & mount USB-C drives.
+# If this host has previously used USB storage (or USB_WAIT_SECONDS is set), wait for it.
+PREFER_USB_MARKER="$HOME/.prefer-usb-storage"
+DEFAULT_WAIT=15
+if [[ -f "$PREFER_USB_MARKER" ]]; then
+    DEFAULT_WAIT=90
+fi
+WAIT_LIMIT="${USB_WAIT_SECONDS:-$DEFAULT_WAIT}"
+REQUIRE_USB="${REQUIRE_USB:-0}"
+
+USB_PATH=$(detect_usb_path || true)
+ELAPSED=0
+while [[ -z "$USB_PATH" && "$ELAPSED" -lt "$WAIT_LIMIT" ]]; do
+    if [[ "$ELAPSED" -eq 0 ]]; then
+        echo "[*] Waiting up to ${WAIT_LIMIT}s for storage / external USB drive to mount..."
+    fi
+    sleep 3
+    ELAPSED=$((ELAPSED + 3))
+    USB_PATH=$(detect_usb_path || true)
+done
+
 if [[ -n "$USB_PATH" && -d "$USB_PATH" ]]; then
+    touch "$PREFER_USB_MARKER"
     MEDIA_ROOT="$USB_PATH/Media"
     mkdir -p "$MEDIA_ROOT/Movies" "$MEDIA_ROOT/Series" "$MEDIA_ROOT/Audiobooks" 2>/dev/null || {
         MEDIA_ROOT="$USB_PATH/Android/data/com.termux/files/Media"
         mkdir -p "$MEDIA_ROOT/Movies" "$MEDIA_ROOT/Series" "$MEDIA_ROOT/Audiobooks"
     }
-    echo "[+] Mounted External USB Drive: $MEDIA_ROOT"
+    echo "[+] Mounted External USB Drive: $MEDIA_ROOT (after ${ELAPSED}s)"
 else
+    if [[ "$REQUIRE_USB" -eq 1 ]]; then
+        echo "[!] ERROR: External USB drive not detected after ${WAIT_LIMIT}s and REQUIRE_USB=1. Aborting start."
+        exit 1
+    fi
+    for _ in $(seq 1 10); do
+        [[ -d "/sdcard" ]] && break
+        sleep 2
+    done
     MEDIA_ROOT="/sdcard/Media"
     mkdir -p "$MEDIA_ROOT/Movies" "$MEDIA_ROOT/Series" "$MEDIA_ROOT/Audiobooks"
     echo "[i] Using Internal Storage: $MEDIA_ROOT"
 fi
 ln -sfn "$MEDIA_ROOT" "$HOME/media"
-
-# Ensure SSH/SFTP server is running on port 8022
-pgrep -x "sshd" >/dev/null || sshd
 
 IP_ADDR=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
 echo "========================================================"
@@ -140,7 +206,7 @@ echo "========================================================"
 # Launch Jellyfin inside Debian with the media directory bound to /media
 proot-distro login debian \
     --bind "$MEDIA_ROOT:/media" \
-    -- bash -c "jellyfin --datadir /var/lib/jellyfin --cachedir /var/cache/jellyfin --webdir /usr/share/jellyfin/web --ffmpeg /usr/lib/jellyfin-ffmpeg/ffmpeg"
+    -- bash -c "DOTNET_SYSTEM_NET_DISABLEIPV6=1 jellyfin --datadir /var/lib/jellyfin --cachedir /var/cache/jellyfin --webdir /usr/share/jellyfin/web --ffmpeg /usr/lib/jellyfin-ffmpeg/ffmpeg"
 EOF
 
 chmod +x "$HOME/start-media-server.sh"

@@ -10,8 +10,9 @@ Millions of capable 64-bit Android phones end up in drawers or e-waste every yea
 
 - **♻️ Zero E-Waste, Ultra-Low Power (~2–4W Idle)**: Runs silently 24/7 with a built-in battery UPS and no root required.
 - **🍎🐧🪟 100% Python + Shell/PowerShell**: Every script in `device/`, `scripts/`, and `tools/` includes a pure **Python 3** version (zero external `pip` dependencies for macOS, Linux, Windows, and Termux) alongside native Bash/PowerShell scripts.
-- **🛡️ Android 12–16+ Phantom Process Killer Fix**: Automatically configures `max_phantom_processes` and Doze battery whitelists over ADB so Android never kills `jellyfin` or `sshd` in the background.
-- **💾 External USB-C Drive + Internal Storage Auto-Detection**: Automatically detects external USB-C SSDs/HDDs (including Android 14+ `/mnt/media_rw/<UUID>` mounts) and binds them to `/media/{Movies,Series,Audiobooks}` inside Debian.
+- **🛡️ Android 12–17+ Phantom Process Killer Fix**: Automatically configures `max_phantom_processes` and Doze battery whitelists over ADB so Android never kills `jellyfin` or `sshd` in the background.
+- **💾 Boot-Safe External USB-C Drive Auto-Detection**: Automatically detects external USB-C SSDs/HDDs (including Android 14–17 `/mnt/media_rw/<UUID>` mounts), waits for Android's `vold` to finish mounting external storage after reboot so `Termux:Boot` never races into an empty fallback folder, and binds `/media/{Movies,Series,Audiobooks}` inside Debian.
+- **🩺 Health, USB-PD Power & Crash Diagnostics (`check_server_health.py` / `check-server-health.ps1`)**: Inspects Jellyfin/SSH status, external USB mount binding, live USB-C PD/PPS voltage/current (detecting silent `0 mA` PD lockouts), battery health, and Android `dropbox` watchdog/panic history.
 - **🔄 Self-Healing Launcher (`start_media_server.py` / `start-media-server.ps1`)**: Checks if Jellyfin (`:8096`) is online; if not, starts it over SSH (`:8022`); if SSH is down, automatically scans for Android Wireless Debugging ports, wakes the phone, starts `sshd`, and launches Jellyfin.
 - **📦 Universal Jellyfin Differential Media Sync (`push_media.py` / `push-media.ps1`)**: Works with **any Jellyfin SSH server** (Android/Termux on port `8022` or Linux/NAS/Raspberry Pi on port `22`). Pushes Movies, TV Series, and Audiobooks, automatically includes companion `.srt` subtitles, skips files already on the server, and optionally triggers a Jellyfin library scan (`POST /Library/Refresh`).
 - **🌐 Persian (`CP1256`) & Nested Subtitle Organizer (`organize-media-and-subs.py`)**: Extracts nested `Subs/` folders and `.zip` subtitle archives alongside video files and automatically converts `Windows-1256` (`CP1256` Persian/Farsi) and `UTF-16` `.srt` files into clean `UTF-8`.
@@ -35,6 +36,8 @@ jellyfin-android-server/
 │   ├── setup-android-host.ps1         # PowerShell ADB provisioner
 │   ├── start_media_server.py          # Cross-platform self-healing launcher (HTTP -> SSH -> Wireless ADB)
 │   ├── start-media-server.ps1         # PowerShell self-healing launcher
+│   ├── check_server_health.py         # Cross-platform health, USB-C PD power & Android crash diagnostics
+│   ├── check-server-health.ps1        # PowerShell health, USB-C PD power & Android crash diagnostics
 │   ├── push_media.py                  # Cross-platform differential media & subtitle uploader
 │   ├── push-media.ps1                 # PowerShell differential media & subtitle uploader
 │   ├── manage_media.py                # Cross-platform remote storage manager (list, space, remove)
@@ -55,7 +58,7 @@ jellyfin-android-server/
    - Install **[Termux](https://github.com/termux/termux-app/releases)** and **[Termux:Boot](https://github.com/termux/termux-boot/releases)** (from GitHub Releases or F-Droid—*not* the outdated Play Store build).
    - Enable **Developer Options** → **USB Debugging** (or **Wireless Debugging**).
 2. **A Computer (macOS, Linux, or Windows) with `adb`, `ssh`/`scp`, and `python3` (or PowerShell)**.
-3. *(Optional)* A **USB-C Hub with Power Delivery (PD)** + an external USB SSD/HDD formatted as `exFAT`.
+3. *(Optional)* A **USB-C Hub with Power Delivery (PD)** + an external USB SSD/HDD formatted as `exFAT` + a **45W–65W+ USB-C PD charger** (see [Hardware & USB-C PD Power Notes](#-hardware-usb-c-pd-power--troubleshooting) below—30W PPS bricks often trip over-current protection when paired with a hub + spinning HDD).
 
 ---
 
@@ -197,6 +200,38 @@ python3 scripts/mount_media_drive.py --unmount
 .\scripts\mount-media-drive.ps1 -DriveLetter Z
 .\scripts\mount-media-drive.ps1 -Unmount -DriveLetter Z
 ```
+
+### 5. Run Health, USB-C PD Power & Crash Diagnostics
+Checks Jellyfin/SSH availability, verifies whether `~/media` is bound to your external USB drive or fell back to internal storage, and queries ADB for battery health, live USB-C PD voltage/current (flagging silent `0 mA` PD lockouts), and recent Android boot/watchdog events:
+
+```bash
+# macOS / Linux / Windows (Python):
+python3 scripts/check_server_health.py
+python3 scripts/check_server_health.py --adb-port 5555
+
+# Windows (PowerShell):
+.\scripts\check-server-health.ps1
+.\scripts\check-server-health.ps1 -AdbPort 5555
+```
+
+---
+
+## ⚡ Hardware, USB-C PD Power & Troubleshooting
+
+### 1. Use a 45W–65W+ USB-C PD Charger (or Self-Powered Hub) with External Drives
+- Many USB-C PD pass-through hubs (such as VLI-based hubs) reserve `7.5W–15W` on Fixed PDOs (`5V/9V/15V/20V`), **but pass `PD_PPS` (`5–11V @ 3A`) through unclamped**.
+- When a phone negotiates PPS fast-charging (~21–23W) while also powering a hub (~2W) and a spinning USB-C HDD (~5–8W peak), a **30W charger** hits its over-current limit. This causes two failure modes:
+  1. **Silent `0 mA` PD Lockout (`shutdown,battery`)**: VBUS still reads `~9V`, but the phone's charging controller trips offline (`usb/online = 0`, `0 mA`) and silently drains to `0%`.
+  2. **USB Drive Brownout -> `vold` / Kernel Panic**: Momentary 5V bus drops freeze the external SCSI disk, locking up Android's `vold` (`StorageManagerService` watchdog restarts and `sd_sync_cache` reboot timeouts).
+- **Solution**: Power the USB-C hub with a **45W–65W+ USB-C PD brick** (such as a laptop USB-C charger), or connect the external drive via a **self-powered USB hub**. Run `python3 scripts/check_server_health.py` to confirm `usb/online=1` and positive charging current.
+
+### 2. Enable Android's 80% Charging Limit for 24/7 Operation
+- On Pixel / Android 15–17+ devices, enable **Settings → Battery → Charging optimization → Limit to 80%** so the phone bypasses battery charging once at 80% instead of holding 100% 24/7.
+
+### 3. Boot USB Drive Mount Timing (`~/.prefer-usb-storage`)
+- After a reboot, Android's `vold` often takes **20–60 seconds** to mount `/mnt/media_rw/<UUID>`, which can finish *after* `Termux:Boot` launches `~/start-media-server.sh`.
+- Once an external USB drive is detected, `~/start-media-server.sh` creates `~/.prefer-usb-storage` and automatically waits up to **90 seconds** (`USB_WAIT_SECONDS=90`) on future boots before falling back to `/sdcard/Media`.
+- To refuse starting on empty internal storage if your USB drive is missing, export `REQUIRE_USB=1` in `~/.termux/boot/start-media-server.sh`. To cleanly restart Jellyfin onto a newly mounted USB drive anytime, run `~/start-media-server.sh --restart`.
 
 ---
 
