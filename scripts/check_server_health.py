@@ -42,12 +42,14 @@ def load_config() -> dict:
     return cfg
 
 
-def test_port(ip: str, port: int, timeout: float = 1.0) -> bool:
-    try:
-        with socket.create_connection((ip, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
+def test_port(ip: str, port: int, timeout: float = 2.0, retries: int = 1) -> bool:
+    for _ in range(max(1, retries)):
+        try:
+            with socket.create_connection((ip, port), timeout=timeout):
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def scan_adb_port(ip: str, start_port: int = 30000, end_port: int = 49999, timeout: float = 0.25) -> int:
@@ -121,8 +123,8 @@ def main():
     print("========================================================\n")
 
     # 1. Service Reachability
-    jf_up = test_port(args.host_ip, args.jellyfin_port, 1.0)
-    ssh_up = test_port(args.host_ip, args.ssh_port, 1.0)
+    jf_up = test_port(args.host_ip, args.jellyfin_port, timeout=2.0, retries=2)
+    ssh_up = test_port(args.host_ip, args.ssh_port, timeout=2.0, retries=2)
     print(f"[1/3] Services on {args.host_ip}:")
     print(f"      Jellyfin (:{args.jellyfin_port}) : {'ONLINE' if jf_up else 'OFFLINE'}")
     print(f"      OpenSSH  (:{args.ssh_port}) : {'ONLINE' if ssh_up else 'OFFLINE'}")
@@ -161,7 +163,7 @@ def main():
 
     adb_port = args.adb_port
     if adb_port <= 0:
-        if test_port(args.host_ip, 5555, 0.8):
+        if test_port(args.host_ip, 5555, timeout=1.5, retries=2):
             adb_port = 5555
         elif args.scan_adb:
             print(f"      Scanning Wireless Debugging ports (30000-49999) on {args.host_ip}...")
@@ -245,7 +247,7 @@ dumpsys dropbox 2>/dev/null | grep -E "system_server_watchdog|SYSTEM_LAST_KMSG|S
         print(f"      USB-C PD     : online={usb_online or '?'} | type={tcpm_type} | VBUS={usb_v:.2f}V | current={usb_ma:.0f} mA")
         if usb_v >= 4.5 and (usb_online == "0" or (abs(usb_ma) < 1 and 0 <= level < 80)):
             print("      [!] WARNING: USB-C PD CHARGING LOCKOUT DETECTED!")
-            print("          Voltage is present on VBUS, but the phone is drawing 0 mA (usb/online=0).")
+            print(f"          VBUS has {usb_v:.2f}V present, but the phone is drawing {usb_ma:.0f} mA (usb/online={usb_online or '?'}, battery={level}%).")
             print("          Common cause: 30W PPS charger + USB-C PD hub + external HDD exceeding brick headroom.")
             print("          Fix: Upgrade to a 45W-65W+ USB-C PD brick or use a self-powered USB hub.")
 
