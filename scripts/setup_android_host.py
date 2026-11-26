@@ -20,6 +20,78 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Core packages that must NEVER be disabled by --debloat-server
+PROTECTED_PACKAGES = {
+    "com.termux", "com.termux.boot", "com.termux.api", "org.jellyfin.mobile",
+    "org.jellyfin.mobile.debug", "com.android.externalstorage",
+    "com.android.providers.media", "com.android.providers.media.module",
+    "com.android.documentsui", "com.android.systemui", "com.android.settings",
+    "com.android.shell", "com.android.phone", "com.android.vending",
+    "com.google.android.gms", "com.google.android.gsf", "com.google.android.webview",
+    "com.google.android.inputmethod.latin", "com.google.android.apps.nexuslauncher",
+    "com.google.android.apps.turbo", "com.google.android.pixelsystemservice",
+    "com.google.android.connectivitythermalpowermanager",
+    "com.android.networkstack.process", "com.android.networkstack.inprocess",
+    "com.google.android.permissioncontroller", "com.google.android.packageinstaller",
+}
+
+# Safe consumer, AI, Android Auto, camera, wallpaper & telemetry packages for headless servers
+HEADLESS_DEBLOAT_PACKAGES = [
+    "com.google.android.googlequicksearchbox",
+    "com.google.android.youtube",
+    "com.google.android.apps.youtube.music",
+    "com.google.android.videos",
+    "com.google.android.gm",
+    "com.google.android.apps.photos",
+    "com.google.android.apps.maps",
+    "com.google.android.apps.docs",
+    "com.google.android.calendar",
+    "com.android.providers.calendar",
+    "com.google.android.apps.messaging",
+    "com.google.android.contacts",
+    "com.android.providers.contacts",
+    "com.google.android.apps.weather",
+    "com.google.android.apps.recorder",
+    "com.google.android.apps.nbu.files",
+    "com.android.chrome",
+    "com.google.android.projection.gearhead",
+    "com.google.android.as",
+    "com.google.android.as.oss",
+    "com.google.android.aicore",
+    "com.google.android.GoogleCamera",
+    "com.google.android.apps.camera.services",
+    "com.google.pixel.camera.services",
+    "com.google.ar.core",
+    "com.google.android.apps.wellbeing",
+    "com.google.android.apps.tips",
+    "com.google.android.apps.pixel.support",
+    "com.google.android.apps.safetyhub",
+    "com.google.android.apps.dreamliner",
+    "com.google.android.dreamlinerupdater",
+    "com.google.android.apps.privacy.wildlife",
+    "com.google.android.apps.healthdata",
+    "com.google.android.healthconnect.controller",
+    "com.google.android.apps.pixel.nowplaying",
+    "com.google.android.apps.pixel.creativeassistant",
+    "com.google.android.apps.pixel.relationships",
+    "com.google.android.apps.emojiwallpaper",
+    "com.google.pixel.livewallpaper",
+    "com.google.android.wallpaper.effects",
+    "com.android.dreams.basic",
+    "com.android.wallpaperbackup",
+    "com.google.android.feedback",
+    "com.google.android.partnersetup",
+    "com.google.android.apps.diagnosticstool",
+    "com.google.android.marvin.talkback",
+    "com.google.android.accessibility.switchaccess",
+    "com.google.android.tts",
+    "com.android.printspooler",
+    "com.google.android.printservice.recommendation",
+    "com.google.android.apps.restore",
+    "com.google.android.apps.setupwizard.searchselector",
+    "com.google.android.ondevicepersonalization.services",
+]
+
 
 def find_adb() -> str:
     adb_in_path = shutil.which("adb")
@@ -57,6 +129,8 @@ def main():
     parser.add_argument("--connect", help="Wireless ADB IP:Port to connect (e.g. 192.168.1.100:5555)")
     parser.add_argument("--pair", help="Wireless ADB IP:Port for initial pairing")
     parser.add_argument("--pair-code", help="6-digit Wireless Debugging pairing code")
+    parser.add_argument("--debloat-server", action="store_true", help="Back up packages and safely disable unused consumer/AI/car/camera apps for headless server RAM savings")
+    parser.add_argument("--restore-server", action="store_true", help="Re-enable all packages saved in backups/baseline/packages-enabled.txt and restore radio/animation defaults")
     args = parser.parse_args()
 
     adb = find_adb()
@@ -93,12 +167,45 @@ def main():
     print(f"[+] Connected to: {model} ({device_code}) - Android {android_ver} (API {sdk_ver})")
     print(f"    LAN Wi-Fi IP: {wlan_ip}\n")
 
-    # 1. Disable Phantom Process Killer
-    print("[1/5] Disabling Android Phantom Process Killer for 24/7 background servers...")
+    backup_dir = REPO_ROOT / "backups" / "baseline"
+    if args.restore_server:
+        base_file = backup_dir / "packages-enabled.txt"
+        if not base_file.is_file():
+            print(f"[!] Baseline backup not found at {base_file}")
+            sys.exit(1)
+        baseline_enabled = {
+            line.replace("package:", "").strip()
+            for line in base_file.read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith("package:")
+        }
+        curr_disabled = {
+            line.replace("package:", "").strip()
+            for line in adb_shell(adb, "pm list packages -d --user 0").splitlines()
+            if line.strip().startswith("package:")
+        }
+        to_restore = sorted(baseline_enabled & curr_disabled)
+        print(f"[*] Restoring {len(to_restore)} package(s) from baseline...")
+        for pkg in to_restore:
+            adb_shell(adb, f"pm enable --user 0 {pkg}")
+            print(f"  [+] Enabled {pkg}")
+        for cmd in (
+            "settings put global window_animation_scale 1.0",
+            "settings put global transition_animation_scale 1.0",
+            "settings put global animator_duration_scale 1.0",
+            "svc bluetooth enable",
+            "svc nfc enable",
+        ):
+            adb_shell(adb, cmd)
+        print("[+] Server baseline restore complete!")
+        return
+
+    # 1. Disable Phantom Process Killer & apply Android 10/11+ Wi-Fi keep-alives
+    print("[1/5] Disabling Android Phantom Process Killer & configuring 24/7 Wi-Fi keep-alives...")
     adb_shell(adb, "/system/bin/device_config set_sync_disabled_for_tests persistent")
     adb_shell(adb, "/system/bin/device_config put activity_manager max_phantom_processes 2147483647")
     adb_shell(adb, "settings put global settings_enable_monitor_phantom_procs false")
-    print("      -> max_phantom_processes set to unlimited (2147483647).")
+    adb_shell(adb, "settings put global wifi_sleep_policy 2")
+    print("      -> max_phantom_processes unlimited & wifi_sleep_policy=2 (Never sleep Wi-Fi).")
 
     # 2. Optional APKs in apks/
     print("[2/5] Checking for Termux ARM64, Termux:Boot, and Termux:API APKs...")
@@ -127,9 +234,49 @@ def main():
         adb_shell(adb, f"dumpsys deviceidle whitelist +{pkg}")
         adb_shell(adb, f"cmd appops set {pkg} RUN_IN_BACKGROUND allow")
         adb_shell(adb, f"cmd appops set {pkg} RUN_ANY_IN_BACKGROUND allow")
+        adb_shell(adb, f"cmd appops set {pkg} WAKE_LOCK allow")
+        adb_shell(adb, f"am set-standby-bucket {pkg} active")
     adb_shell(adb, "cmd appops set com.termux MANAGE_EXTERNAL_STORAGE allow")
     adb_shell(adb, "pm grant com.termux android.permission.READ_EXTERNAL_STORAGE")
     adb_shell(adb, "pm grant com.termux android.permission.WRITE_EXTERNAL_STORAGE")
+
+    if args.debloat_server:
+        print("\n[Optional] Running Headless Server Debloat (saving pre-change baseline first)...")
+        if not (backup_dir / "packages-enabled.txt").is_file():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            (backup_dir / "packages-enabled.txt").write_text(
+                adb_shell(adb, "pm list packages -e --user 0 | sort"), encoding="utf-8"
+            )
+            (backup_dir / "packages-disabled.txt").write_text(
+                adb_shell(adb, "pm list packages -d --user 0 | sort"), encoding="utf-8"
+            )
+            (backup_dir / "settings-global.txt").write_text(
+                adb_shell(adb, "settings list global | sort"), encoding="utf-8"
+            )
+            print(f"      -> Baseline saved to {backup_dir}")
+        else:
+            print(f"      -> Preserving existing baseline at {backup_dir}")
+
+        disabled_count = 0
+        for pkg in HEADLESS_DEBLOAT_PACKAGES:
+            if pkg in PROTECTED_PACKAGES:
+                continue
+            out = adb_shell(adb, f"pm disable-user --user 0 {pkg}")
+            if "disabled-user" in out:
+                disabled_count += 1
+        for cmd in (
+            "svc bluetooth disable",
+            "svc nfc disable",
+            "settings put global window_animation_scale 0.5",
+            "settings put global transition_animation_scale 0.5",
+            "settings put global animator_duration_scale 0.5",
+            "settings put global send_action_app_error 0",
+            "settings put secure send_action_app_error 0",
+            "pm trim-caches 999G",
+        ):
+            adb_shell(adb, cmd)
+        print(f"      -> Disabled {disabled_count} unused packages, turned off BT/NFC, set 0.5x animations & trimmed caches.")
+        print("      -> Roll back anytime with: python3 scripts/setup_android_host.py --restore-server")
 
     # 4. Inspect mounted storage / External USB Drive
     print("[4/5] Checking mounted storage volumes (/storage)...")

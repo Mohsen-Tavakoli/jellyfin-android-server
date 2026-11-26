@@ -2,8 +2,9 @@
 config.ps1
 .env
 
-# Local APK cache
+# Local APK cache & device backups
 apks/*.apk
+backups/
 
 # Python & OS artifacts
 __pycache__/

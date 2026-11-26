@@ -10,7 +10,8 @@ Millions of capable 64-bit Android phones end up in drawers or e-waste every yea
 
 - **♻️ Zero E-Waste, Ultra-Low Power (~2–4W Idle)**: Runs silently 24/7 with a built-in battery UPS and no root required.
 - **🍎🐧🪟 100% Python + Shell/PowerShell**: Every script in `device/`, `scripts/`, and `tools/` includes a pure **Python 3** version (zero external `pip` dependencies for macOS, Linux, Windows, and Termux) alongside native Bash/PowerShell scripts.
-- **🛡️ Android 12–17+ Phantom Process Killer Fix**: Automatically configures `max_phantom_processes` and Doze battery whitelists over ADB so Android never kills `jellyfin` or `sshd` in the background.
+- **🛡️ Android 10–17+ Keep-Alives & Phantom Process Killer Fix**: Automatically configures `max_phantom_processes`, `wifi_sleep_policy=2`, Termux `WAKE_LOCK` + `active` standby bucket, and Doze battery whitelists over ADB so Android never kills `jellyfin` or `sshd` in the background.
+- **🧹 Optional Headless Server Debloat & Low-RAM (4 GB) Auto-Tuning**: Pass `--debloat-server` / `-DebloatServer` to automatically back up your baseline and safely disable unused consumer/AI/Android Auto/camera/wallpaper bloat (saving **~1+ GB RAM+Swap** with one-click `--restore-server` rollback while protecting USB storage and battery/thermal controllers). On devices with <= 6 GB RAM (such as a 4 GB Pixel 2 XL), `start-media-server.sh` automatically caps .NET GC memory (`DOTNET_gcServer=0`, `DOTNET_GCHeapHardLimitPercent=40`).
 - **💾 Boot-Safe External USB-C Drive Auto-Detection**: Automatically detects external USB-C SSDs/HDDs (including Android 14–17 `/mnt/media_rw/<UUID>` mounts), waits for Android's `vold` to finish mounting external storage after reboot so `Termux:Boot` never races into an empty fallback folder, and binds `/media/{Movies,Series,Audiobooks}` inside Debian.
 - **🩺 Health, USB-PD Power & Crash Diagnostics (`check_server_health.py` / `check-server-health.ps1`)**: Inspects Jellyfin/SSH status, external USB mount binding, live USB-C PD/PPS voltage/current (detecting silent `0 mA` PD lockouts), battery health, and Android `dropbox` watchdog/panic history.
 - **🔄 Self-Healing Launcher (`start_media_server.py` / `start-media-server.ps1`)**: Checks if Jellyfin (`:8096`) is online; if not, starts it over SSH (`:8022`); if SSH is down, automatically scans for Android Wireless Debugging ports, wakes the phone, starts `sshd`, and launches Jellyfin.
@@ -68,15 +69,19 @@ Connect your phone via USB-C (or Wireless Debugging) and run:
 **macOS / Linux / Cross-Platform (Python 3):**
 ```bash
 python3 scripts/setup_android_host.py
-# Or over Wireless ADB:
-python3 scripts/setup_android_host.py --connect 192.168.1.100:5555
+# Or over Wireless ADB + optional headless server debloat (backs up baseline first):
+python3 scripts/setup_android_host.py --connect 192.168.1.100:5555 --debloat-server
+# One-click restore anytime:
+python3 scripts/setup_android_host.py --connect 192.168.1.100:5555 --restore-server
 ```
 
 **Windows (PowerShell):**
 ```powershell
 .\scripts\setup-android-host.ps1
-# Or over Wireless ADB:
-.\scripts\setup-android-host.ps1 -ConnectIpPort "192.168.1.100:5555"
+# Or over Wireless ADB + optional headless server debloat:
+.\scripts\setup-android-host.ps1 -ConnectIpPort "192.168.1.100:5555" -DebloatServer
+# One-click restore anytime:
+.\scripts\setup-android-host.ps1 -ConnectIpPort "192.168.1.100:5555" -RestoreServer
 ```
 
 ---

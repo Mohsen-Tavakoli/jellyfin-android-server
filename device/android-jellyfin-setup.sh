@@ -203,10 +203,18 @@ echo "  SSH / SFTP Upload     : ssh -p 8022 $(whoami)@${IP_ADDR:-<device-ip>}"
 echo "  Media Directory       : $MEDIA_ROOT"
 echo "========================================================"
 
+# Auto-tune .NET GC on <= 6 GB RAM phones (e.g. 4 GB Pixel 2 XL / older flagships)
+MEM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+DOTNET_GC_ENV=""
+if [[ "$MEM_KB" -gt 0 && "$MEM_KB" -le 6291456 ]]; then
+    DOTNET_GC_ENV="DOTNET_gcServer=0 DOTNET_GCHeapHardLimitPercent=40"
+    echo "[i] Low-RAM host detected (${MEM_KB} kB) -> enabling .NET GC heap cap (40%)"
+fi
+
 # Launch Jellyfin inside Debian with the media directory bound to /media
 proot-distro login debian \
     --bind "$MEDIA_ROOT:/media" \
-    -- bash -c "DOTNET_SYSTEM_NET_DISABLEIPV6=1 jellyfin --datadir /var/lib/jellyfin --cachedir /var/cache/jellyfin --webdir /usr/share/jellyfin/web --ffmpeg /usr/lib/jellyfin-ffmpeg/ffmpeg"
+    -- bash -c "${DOTNET_GC_ENV} DOTNET_SYSTEM_NET_DISABLEIPV6=1 jellyfin --datadir /var/lib/jellyfin --cachedir /var/cache/jellyfin --webdir /usr/share/jellyfin/web --ffmpeg /usr/lib/jellyfin-ffmpeg/ffmpeg"
 EOF
 
 chmod +x "$HOME/start-media-server.sh"
